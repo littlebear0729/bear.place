@@ -1,0 +1,121 @@
+name: rplace
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 2gb
+      --maxmemory-policy noeviction
+      --save ""
+    ports: ["6379:6379"]
+    volumes: ["redis_data:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: rplace
+      POSTGRES_USER: rplace
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rplace_dev}
+    ports: ["5432:5432"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rplace -d rplace"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-rplace}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-rplace_dev}
+    ports: ["5672:5672", "15672:15672"]
+    volumes: ["rabbitmq_data:/var/lib/rabbitmq"]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # 一次性任务：把最新快照装载进 Redis，成功后退出。
+  canvas-init:
+    profiles: ["app"]
+    build: ./server
+    command: ["node", "dist/init-canvas.js"]
+    environment: &server-env
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgres://rplace:${POSTGRES_PASSWORD:-rplace_dev}@postgres:5432/rplace
+      AMQP_URL: amqp://${RABBITMQ_USER:-rplace}:${RABBITMQ_PASSWORD:-rplace_dev}@rabbitmq:5672
+      CANVAS_ID: main
+      COOLDOWN_SECONDS: "300"
+      BROADCAST_BATCH_MS: "100"
+      AUTH_SECRET: ${AUTH_SECRET:-dev-only-secret}
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+    restart: "no"
+
+  api:
+    profiles: ["app"]
+    build: ./server
+    command: ["node", "dist/api.js"]
+    environment:
+      <<: *server-env
+      SPOOL_DIR: /var/lib/rplace/spool
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8080}
+    ports: ["3000:3000"]
+    volumes: ["spool_data:/var/lib/rplace"]
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      canvas-init: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "node", "-e",
+             "fetch('http://127.0.0.1:3000/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  worker:
+    profiles: ["app"]
+    build: ./server
+    command: ["node", "dist/worker.js"]
+    environment:
+      <<: *server-env
+      SPOOL_DIR: /var/lib/rplace/spool
+    volumes: ["spool_data:/var/lib/rplace"]
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    restart: unless-stopped
+
+  # 前端构建产物 + Nginx（静态资源、/api 与 /ws 反代）
+  web:
+    profiles: ["app"]
+    build: ./web
+    ports: ["8080:80"]
+    depends_on:
+      api: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  rabbitmq_data:
+  postgres_data:
+  spool_data:
