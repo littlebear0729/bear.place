@@ -3,13 +3,13 @@ import type { Redis } from 'ioredis';
 import { WebSocket, WebSocketServer } from 'ws';
 import { config } from './config.js';
 import {
-  CANVAS_HEIGHT,
-  CANVAS_WIDTH,
+  CONFIG_CHANNEL,
   UPDATES_CHANNEL,
   WS_FRAME_MAX_PIXELS,
   WS_SEND_QUEUE_LIMIT,
   keys,
 } from './constants.js';
+import { parseCanvasConfig, type CanvasState } from './canvas-config.js';
 import { SESSION_COOKIE, parseCookies, verifySession } from './auth.js';
 import { isRecord } from './guards.js';
 import { getSeq } from './snapshot.js';
@@ -22,6 +22,7 @@ import {
 export interface WsDeps {
   redis: Redis;
   sub: Redis;
+  state: CanvasState;
 }
 
 export interface WsController {
@@ -86,11 +87,30 @@ export function attachWebSocket(server: Server, deps: WsDeps): WsController {
     }
   };
 
-  deps.sub.on('message', (_channel, raw) => {
+  deps.sub.on('message', (channel, raw) => {
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
     } catch {
+      return;
+    }
+    if (channel === CONFIG_CHANNEL) {
+      const next = parseCanvasConfig(parsed);
+      if (!next) return;
+      deps.state.config = next;
+      void getSeq(deps.redis, config.canvasId)
+        .then((seq) => {
+          broadcast(
+            JSON.stringify({
+              t: 'config',
+              width: next.width,
+              height: next.height,
+              palette: next.palette,
+              seq,
+            }),
+          );
+        })
+        .catch((error) => console.error('[ws] config broadcast failed', error));
       return;
     }
     if (!isPixelUpdate(parsed)) return;
@@ -105,7 +125,7 @@ export function attachWebSocket(server: Server, deps: WsDeps): WsController {
     subscriberHasBeenReady = true;
   });
 
-  void deps.sub.subscribe(UPDATES_CHANNEL).catch((error) => {
+  void deps.sub.subscribe(UPDATES_CHANNEL, CONFIG_CHANNEL).catch((error) => {
     console.error('[ws] subscribe failed', error);
   });
 
@@ -169,6 +189,7 @@ export function attachWebSocket(server: Server, deps: WsDeps): WsController {
         getSeq(deps.redis, config.canvasId),
         deps.redis.ttl(keys.ratelimit(userId)),
       ]);
+      const canvas = deps.state.config;
       send(
         ws,
         JSON.stringify({
@@ -176,8 +197,9 @@ export function attachWebSocket(server: Server, deps: WsDeps): WsController {
           seq,
           server_time: Date.now(),
           cooldown_ms: ttl > 0 ? ttl * 1000 : 0,
-          width: CANVAS_WIDTH,
-          height: CANVAS_HEIGHT,
+          width: canvas.width,
+          height: canvas.height,
+          palette: canvas.palette,
         }),
       );
     })().catch(() => ws.close(1011, 'hello_failed'));

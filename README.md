@@ -40,18 +40,27 @@ npm run dev                                 # :5173，已代理 /api 与 /ws 到
 
 环境变量见 `.env.example` 与 `server/src/config.ts`；本地默认值指向 `127.0.0.1`。
 
+画布读取是公开的：刷新页面会立即拉取 `/api/canvas/meta` 与 `/api/canvas/snapshot`，无需先登录或放置。
+放置仍需登录；`ADMIN_USERNAME`（默认 `admin`）对应的账号登录后，侧栏会出现画布管理面板，可调整
+16–4096 的宽高和 1–256 种颜色。改尺寸会清空画布，改颜色保留像素。
+
+修改 `.env` 后需要重建容器才会生效：`docker compose --profile app up -d --build`。
+`COOLDOWN_SECONDS` 由 compose 传给 `api`/`worker`/`canvas-init`，前端展示的冷却是服务端下发值。
+
 ## 接口
 
 契约以 DESIGN.md §4.3 为准，实现对应关系：
 
 | 端点 | 说明 |
 |---|---|
-| `GET /api/canvas/meta` | 尺寸、调色板、当前 seq、冷却秒数、服务器时间 |
-| `GET /api/canvas/snapshot` | 20 字节头 + 1000000 字节位图，`ETag: "v1-<seq>"` |
+| `GET /api/canvas/meta` | 尺寸、调色板、当前 seq、冷却秒数、服务器时间；无需登录 |
+| `GET /api/canvas/snapshot` | 20 字节头 + `width×height` 位图，`ETag: "v1-<seq>"`；无需登录 |
 | `GET /api/canvas/deltas?since=` | Stream 追平，截断时返回 410 |
 | `POST /api/pixels` | 放置；`request_id` 幂等；429 带 `retry_after_ms` |
 | `POST /api/dev/login` | 开发期登录，签发 HMAC cookie |
-| `GET /api/me` | 当前会话 |
+| `GET /api/me` | 当前会话，含 `is_admin` |
+| `GET /api/admin/canvas` | 管理员：读取画布尺寸/调色板（403：非管理员） |
+| `PUT /api/admin/canvas` | 管理员：调整尺寸与调色板；尺寸变化会清空画布 |
 | `GET /ws` | `hello` / `px` / `ping` / `resync`，100ms 合批 |
 | `GET /healthz`、`GET /readyz`、`GET /metrics` | 存活、就绪、Prometheus |
 

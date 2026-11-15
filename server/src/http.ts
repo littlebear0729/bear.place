@@ -3,22 +3,29 @@ import type { NextFunction, Request, Response } from 'express';
 import type { Redis } from 'ioredis';
 import type pg from 'pg';
 import { config } from './config.js';
-import {
-  CANVAS_HEIGHT,
-  CANVAS_WIDTH,
-  PALETTE,
-  keys,
-} from './constants.js';
+import { CONFIG_CHANNEL, keys } from './constants.js';
 import { SESSION_COOKIE, parseCookies, signSession, verifySession } from './auth.js';
 import {
   ApiError,
   badColor,
   badRequest,
   cooldown,
+  forbidden,
   outOfBounds,
   unavailable,
   unauthenticated,
 } from './errors.js';
+import {
+  MAX_CANVAS_SIZE,
+  MAX_PALETTE_SIZE,
+  MIN_CANVAS_SIZE,
+  normalizePalette,
+  resetCanvas,
+  saveConfigToDb,
+  storeCanvasConfig,
+  type CanvasConfig,
+  type CanvasState,
+} from './canvas-config.js';
 import { Breaker } from './breaker.js';
 import { placePixel } from './placement.js';
 import { DeltasGoneError, getDeltas, getSeq, getSnapshot } from './snapshot.js';
@@ -37,6 +44,7 @@ import { isRecord } from './guards.js';
 export interface AppDeps {
   redis: Redis;
   pool: pg.Pool;
+  state: CanvasState;
 }
 
 type AsyncHandler = (req: Request, res: Response) => Promise<unknown>;
@@ -60,6 +68,19 @@ const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
 export function createApp(deps: AppDeps): express.Express {
   const app = express();
   const redisBreaker = new Breaker('redis');
+
+  const isAdminUser = async (userId: number): Promise<boolean> => {
+    const { rows } = await deps.pool.query<{ username: string }>(
+      'SELECT username FROM users WHERE id = $1',
+      [userId],
+    );
+    return rows[0]?.username === config.adminUsername;
+  };
+
+  const requireAdmin = async (res: Response): Promise<void> => {
+    const userId = Number(res.locals.userId);
+    if (!Number.isInteger(userId) || !(await isAdminUser(userId))) throw forbidden();
+  };
 
   app.disable('x-powered-by');
   app.use(express.json({ limit: '4kb' }));
@@ -90,12 +111,13 @@ export function createApp(deps: AppDeps): express.Express {
     asyncRoute(async (_req, res) => {
       const seq = await getSeq(deps.redis, config.canvasId);
       canvasSeq.set(seq);
+      const canvas = deps.state.config;
       res.json({
-        width: CANVAS_WIDTH,
-        height: CANVAS_HEIGHT,
+        width: canvas.width,
+        height: canvas.height,
         seq,
         cooldown_seconds: config.cooldownSeconds,
-        palette: PALETTE,
+        palette: canvas.palette,
         server_time: Date.now(),
       });
     }),
@@ -104,7 +126,13 @@ export function createApp(deps: AppDeps): express.Express {
   app.get(
     '/api/canvas/snapshot',
     asyncRoute(async (req, res) => {
-      const snapshot = await getSnapshot(deps.redis, config.canvasId);
+      const canvas = deps.state.config;
+      const snapshot = await getSnapshot(
+        deps.redis,
+        config.canvasId,
+        canvas.width,
+        canvas.height,
+      );
       canvasSeq.set(snapshot.seq);
       const etag = `"v1-${snapshot.seq}"`;
       res.set({
@@ -173,10 +201,13 @@ export function createApp(deps: AppDeps): express.Express {
           throw badRequest('x/y/color 必须为整数，request_id 必须是 8–128 位安全字符');
         }
 
-        if (x < 0 || x >= CANVAS_WIDTH || y < 0 || y >= CANVAS_HEIGHT) {
+        const canvas = deps.state.config;
+        if (x < 0 || x >= canvas.width || y < 0 || y >= canvas.height) {
           throw outOfBounds();
         }
-        if (color < 0 || color >= PALETTE.length) throw badColor();
+        if (color < 0 || color >= canvas.palette.length) {
+          throw badColor(canvas.palette.length);
+        }
 
         let result;
         const nowMs = Date.now();
@@ -185,10 +216,12 @@ export function createApp(deps: AppDeps): express.Express {
             placePixel(deps.redis, {
               canvasId: config.canvasId,
               userId,
-              offset: y * CANVAS_WIDTH + x,
+              offset: y * canvas.width + x,
               color,
               requestId,
               cooldownSeconds: config.cooldownSeconds,
+              maxOffset: canvas.width * canvas.height,
+              maxColor: canvas.palette.length,
               nowMs,
             }),
           );
@@ -202,6 +235,9 @@ export function createApp(deps: AppDeps): express.Express {
         }
         if (result.kind === 'invalid') {
           throw outOfBounds();
+        }
+        if (result.kind === 'invalid_color') {
+          throw badColor(canvas.palette.length);
         }
         if (result.kind === 'replay') {
           idempotencyReplay.inc();
@@ -239,7 +275,8 @@ export function createApp(deps: AppDeps): express.Express {
         'SELECT username FROM users WHERE id = $1',
         [userId],
       );
-      res.json({ user_id: userId, username: rows[0]?.username ?? null });
+      const username = rows[0]?.username ?? null;
+      res.json({ user_id: userId, username, is_admin: username === config.adminUsername });
     }),
   );
 
@@ -264,7 +301,68 @@ export function createApp(deps: AppDeps): express.Express {
         'Set-Cookie',
         `${SESSION_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${config.sessionTtlSeconds}`,
       );
-      res.json({ user_id: userId, username: rows[0].username });
+      res.json({
+        user_id: userId,
+        username: rows[0].username,
+        is_admin: rows[0].username === config.adminUsername,
+      });
+    }),
+  );
+
+  app.get(
+    '/api/admin/canvas',
+    authMiddleware,
+    asyncRoute(async (_req, res) => {
+      await requireAdmin(res);
+      res.json({
+        ...deps.state.config,
+        seq: await getSeq(deps.redis, config.canvasId),
+      });
+    }),
+  );
+
+  app.put(
+    '/api/admin/canvas',
+    authMiddleware,
+    asyncRoute(async (req, res) => {
+      await requireAdmin(res);
+      const body: unknown = req.body;
+      if (!isRecord(body)) throw badRequest('请求体必须是 JSON 对象');
+
+      const width = body.width;
+      const height = body.height;
+      if (
+        typeof width !== 'number' || !Number.isInteger(width) ||
+        typeof height !== 'number' || !Number.isInteger(height) ||
+        width < MIN_CANVAS_SIZE || width > MAX_CANVAS_SIZE ||
+        height < MIN_CANVAS_SIZE || height > MAX_CANVAS_SIZE
+      ) {
+        throw badRequest(`画布宽高必须是 ${MIN_CANVAS_SIZE}–${MAX_CANVAS_SIZE} 的整数`);
+      }
+      const palette = normalizePalette(body.palette);
+      if (!palette) {
+        throw badRequest(`palette 必须是 1–${MAX_PALETTE_SIZE} 个 #RRGGBB 颜色`);
+      }
+
+      const current = deps.state.config;
+      const resized = width !== current.width || height !== current.height;
+      const next: CanvasConfig = {
+        width,
+        height,
+        palette,
+        epochSeq: current.epochSeq,
+      };
+
+      if (resized) {
+        next.epochSeq = await resetCanvas(deps.redis, config.canvasId, width * height);
+      }
+
+      await storeCanvasConfig(deps.redis, config.canvasId, next);
+      deps.state.config = next;
+      await deps.redis.publish(CONFIG_CHANNEL, JSON.stringify(next));
+      await saveConfigToDb(deps.pool, config.canvasId, next);
+
+      res.json({ ...next, seq: await getSeq(deps.redis, config.canvasId) });
     }),
   );
 

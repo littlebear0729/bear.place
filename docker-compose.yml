@@ -60,9 +60,10 @@ services:
       DATABASE_URL: postgres://rplace:${POSTGRES_PASSWORD:-rplace_dev}@postgres:5432/rplace
       AMQP_URL: amqp://${RABBITMQ_USER:-rplace}:${RABBITMQ_PASSWORD:-rplace_dev}@rabbitmq:5672
       CANVAS_ID: main
-      COOLDOWN_SECONDS: "300"
-      BROADCAST_BATCH_MS: "100"
+      COOLDOWN_SECONDS: ${COOLDOWN_SECONDS:-300}
+      BROADCAST_BATCH_MS: ${BROADCAST_BATCH_MS:-100}
       AUTH_SECRET: ${AUTH_SECRET:-dev-only-secret}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }

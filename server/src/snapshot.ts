@@ -1,7 +1,5 @@
 import type { Redis } from 'ioredis';
 import {
-  CANVAS_HEIGHT,
-  CANVAS_WIDTH,
   DELTA_MAX_ENTRIES,
   SNAPSHOT_HEADER_BYTES,
   SNAPSHOT_MAGIC,
@@ -14,21 +12,32 @@ export interface CanvasSnapshot {
   seq: number;
 }
 
-export function encodeSnapshot(data: Buffer, seq: number): Buffer {
-  const out = Buffer.alloc(SNAPSHOT_HEADER_BYTES + CANVAS_WIDTH * CANVAS_HEIGHT);
+export function encodeSnapshot(
+  data: Buffer,
+  seq: number,
+  width: number,
+  height: number,
+): Buffer {
+  const pixelCount = width * height;
+  const out = Buffer.alloc(SNAPSHOT_HEADER_BYTES + pixelCount);
   out.write(SNAPSHOT_MAGIC, 0, 'ascii');
   out.writeUInt16LE(SNAPSHOT_VERSION, 4);
-  out.writeUInt16LE(CANVAS_WIDTH, 6);
-  out.writeUInt16LE(CANVAS_HEIGHT, 8);
+  out.writeUInt16LE(width, 6);
+  out.writeUInt16LE(height, 8);
   out.writeUInt16LE(0, 10);
   out.writeBigUInt64LE(BigInt(seq), 12);
   if (data.length > 0) {
-    data.copy(out, SNAPSHOT_HEADER_BYTES, 0, Math.min(data.length, CANVAS_WIDTH * CANVAS_HEIGHT));
+    data.copy(out, SNAPSHOT_HEADER_BYTES, 0, Math.min(data.length, pixelCount));
   }
   return out;
 }
 
-async function readCanvas(redis: Redis, canvasId: string): Promise<CanvasSnapshot> {
+async function readCanvas(
+  redis: Redis,
+  canvasId: string,
+  width: number,
+  height: number,
+): Promise<CanvasSnapshot> {
   // 先读位图再读 seq：即使中间有写入，seq 只会更大，水位比较仍然安全。
   const reply = await redis
     .pipeline()
@@ -41,11 +50,19 @@ async function readCanvas(redis: Redis, canvasId: string): Promise<CanvasSnapsho
   if (dataErr) throw dataErr;
   if (seqErr) throw seqErr;
   const seq = seqRaw ? Number(seqRaw) : 0;
-  return { buffer: encodeSnapshot((data as Buffer | null) ?? Buffer.alloc(0), seq), seq };
+  return {
+    buffer: encodeSnapshot((data as Buffer | null) ?? Buffer.alloc(0), seq, width, height),
+    seq,
+  };
 }
 
-export async function getSnapshot(redis: Redis, canvasId: string): Promise<CanvasSnapshot> {
-  return readCanvas(redis, canvasId);
+export async function getSnapshot(
+  redis: Redis,
+  canvasId: string,
+  width: number,
+  height: number,
+): Promise<CanvasSnapshot> {
+  return readCanvas(redis, canvasId, width, height);
 }
 
 export async function getSeq(redis: Redis, canvasId: string): Promise<number> {

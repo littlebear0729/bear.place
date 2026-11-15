@@ -13,7 +13,7 @@ CREATE TABLE pixel_events (
     user_id     BIGINT      NOT NULL REFERENCES users(id),
     x           INT         NOT NULL CHECK (x >= 0),
     y           INT         NOT NULL CHECK (y >= 0),
-    color       SMALLINT    NOT NULL CHECK (color BETWEEN 0 AND 15),
+    color       SMALLINT    NOT NULL CHECK (color BETWEEN 0 AND 255),
     placed_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     request_id  TEXT        NOT NULL
 );
@@ -27,8 +27,19 @@ CREATE TABLE canvas_snapshots (
     id          BIGSERIAL PRIMARY KEY,
     canvas_id   TEXT        NOT NULL DEFAULT 'main',
     seq         BIGINT      NOT NULL,
-    canvas_data BYTEA       NOT NULL CHECK (octet_length(canvas_data) = 1000000),
+    canvas_data BYTEA       NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_snapshots_latest ON canvas_snapshots (canvas_id, id DESC);
+
+-- 运行时画布配置（管理员可调整尺寸与调色板）。
+-- epoch_seq 是最近一次尺寸调整产生的水位，早于它的事件不属于当前画布。
+CREATE TABLE canvas_settings (
+    canvas_id   TEXT PRIMARY KEY,
+    width       INTEGER NOT NULL CHECK (width BETWEEN 16 AND 4096),
+    height      INTEGER NOT NULL CHECK (height BETWEEN 16 AND 4096),
+    palette     JSONB   NOT NULL,
+    epoch_seq   BIGINT  NOT NULL DEFAULT 0,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

@@ -1,8 +1,21 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { ApiFailure, fetchMe, login, placePixel } from './api';
+import {
+  ApiFailure,
+  fetchMe,
+  login,
+  placePixel,
+  saveCanvasSettings,
+} from './api';
 import { LiveClient } from './live';
-import { HEIGHT, PALETTE, WIDTH } from './protocol';
-import { CanvasRenderer } from './renderer';
+import {
+  HEIGHT,
+  PALETTE,
+  WIDTH,
+  fetchMeta,
+  fetchSnapshot,
+  type CanvasConfig,
+} from './protocol';
+import { CanvasRenderer, type HoverPixel } from './renderer';
 
 type Connection = 'offline' | 'connecting' | 'live';
 
@@ -18,16 +31,26 @@ export function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const rendererRef = useRef<CanvasRenderer | null>(null);
   const liveRef = useRef<LiveClient | null>(null);
+  const snapshotSeqRef = useRef(0);
 
   const [username, setUsername] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [connection, setConnection] = useState<Connection>('offline');
   const [selectedColor, setSelectedColor] = useState(5);
+  const [palette, setPalette] = useState<string[]>([...PALETTE]);
+  const [dims, setDims] = useState({ width: WIDTH, height: HEIGHT });
+  const [hover, setHover] = useState<HoverPixel | null>(null);
   const [cooldownUntil, setCooldownUntil] = useState(0);
   const [serverOffset, setServerOffset] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [loginName, setLoginName] = useState('');
   const [busy, setBusy] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [adminWidth, setAdminWidth] = useState(String(WIDTH));
+  const [adminHeight, setAdminHeight] = useState(String(HEIGHT));
+  const [adminPalette, setAdminPalette] = useState<string[]>([...PALETTE]);
+  const [adminBusy, setAdminBusy] = useState(false);
 
   const stateRef = useRef({ username, selectedColor, cooldownUntil, serverOffset });
   stateRef.current = { username, selectedColor, cooldownUntil, serverOffset };
@@ -87,7 +110,33 @@ export function App() {
       canvas.setPointerCapture(event.pointerId);
     };
 
+    const toWorld = (clientX: number, clientY: number) => {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: Math.floor(
+          (clientX - rect.left - renderer.camera.x) / renderer.camera.scale,
+        ),
+        y: Math.floor(
+          (clientY - rect.top - renderer.camera.y) / renderer.camera.scale,
+        ),
+      };
+    };
+
+    const updateHover = (clientX: number, clientY: number) => {
+      const world = toWorld(clientX, clientY);
+      const inside =
+        world.x >= 0 && world.x < renderer.width &&
+        world.y >= 0 && world.y < renderer.height;
+      renderer.setHover(inside ? world : null);
+      setHover((previous) => {
+        if (!inside) return previous === null ? previous : null;
+        if (previous?.x === world.x && previous.y === world.y) return previous;
+        return world;
+      });
+    };
+
     const onPointerMove = (event: PointerEvent) => {
+      updateHover(event.clientX, event.clientY);
       if (!pointer.down) return;
       const dx = event.clientX - pointer.lastX;
       const dy = event.clientY - pointer.lastY;
@@ -98,7 +147,13 @@ export function App() {
         renderer.camera.x += dx;
         renderer.camera.y += dy;
         renderer.invalidate();
+        updateHover(event.clientX, event.clientY);
       }
+    };
+
+    const onPointerLeave = () => {
+      renderer.setHover(null);
+      setHover(null);
     };
 
     const onPointerUp = async (event: PointerEvent) => {
@@ -106,14 +161,15 @@ export function App() {
       pointer.down = false;
       if (pointer.dragged) return;
 
-      const rect = canvas.getBoundingClientRect();
-      const worldX = Math.floor(
-        (event.clientX - rect.left - renderer.camera.x) / renderer.camera.scale,
-      );
-      const worldY = Math.floor(
-        (event.clientY - rect.top - renderer.camera.y) / renderer.camera.scale,
-      );
-      if (worldX < 0 || worldX >= WIDTH || worldY < 0 || worldY >= HEIGHT) return;
+      const world = toWorld(event.clientX, event.clientY);
+      const worldX = world.x;
+      const worldY = world.y;
+      if (
+        worldX < 0 || worldX >= renderer.width ||
+        worldY < 0 || worldY >= renderer.height
+      ) {
+        return;
+      }
 
       const current = stateRef.current;
       if (!current.username) {
@@ -125,7 +181,7 @@ export function App() {
         return;
       }
 
-      const index = worldY * WIDTH + worldX;
+      const index = worldY * renderer.width + worldX;
       const previous = renderer.getPixel(index);
       renderer.setPixel(index, current.selectedColor);
       try {
@@ -164,6 +220,7 @@ export function App() {
     canvas.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerup', onPointerUp);
     canvas.addEventListener('pointercancel', onPointerCancel);
+    canvas.addEventListener('pointerleave', onPointerLeave);
     canvas.addEventListener('wheel', onWheel, { passive: false });
 
     const live = new LiveClient(renderer, {
@@ -172,24 +229,62 @@ export function App() {
         setServerOffset(serverTime - Date.now());
         if (cooldownMs > 0) setCooldownUntil(serverTime + cooldownMs);
       },
+      onConfig: (config: CanvasConfig) => {
+        setPalette(config.palette);
+        setDims({ width: config.width, height: config.height });
+        setSelectedColor((previous) =>
+          previous < config.palette.length ? previous : 0,
+        );
+      },
       onError: setToast,
       onAuthRequired: () => {
         setUsername(null);
+        setIsAdmin(false);
         setToast('会话已过期，请重新登录');
       },
     });
     liveRef.current = live;
 
     let cancelled = false;
-    void fetchMe()
-      .then((me) => {
-        if (cancelled || !me) return;
-        setUsername(me.username);
-        live.connect();
-      })
-      .catch(() => {
-        /* 未登录或服务尚未就绪，保留登录表单 */
-      });
+    const initialize = async () => {
+      const [metaResult, snapshotResult] = await Promise.allSettled([
+        fetchMeta(),
+        fetchSnapshot(),
+      ]);
+      if (cancelled) return;
+
+      let activePalette = renderer.getPalette();
+      if (metaResult.status === 'fulfilled') {
+        const meta = metaResult.value;
+        activePalette = meta.palette;
+        renderer.configure(meta.width, meta.height, meta.palette);
+        renderer.fit(wrap.clientWidth, wrap.clientHeight);
+        setPalette(meta.palette);
+        setDims({ width: meta.width, height: meta.height });
+        setSelectedColor((previous) =>
+          previous < meta.palette.length ? previous : 0,
+        );
+        setServerOffset(meta.server_time - Date.now());
+      }
+
+      if (snapshotResult.status === 'fulfilled') {
+        const snapshot = snapshotResult.value;
+        renderer.configure(snapshot.width, snapshot.height, activePalette);
+        renderer.load(snapshot.pixels);
+        snapshotSeqRef.current = snapshot.seq;
+        if (metaResult.status !== 'fulfilled') {
+          setDims({ width: snapshot.width, height: snapshot.height });
+          renderer.fit(wrap.clientWidth, wrap.clientHeight);
+        }
+      }
+
+      const me = await fetchMe().catch(() => undefined);
+      if (cancelled || !me) return;
+      setUsername(me.username);
+      setIsAdmin(me.is_admin);
+      live.connect(snapshotSeqRef.current);
+    };
+    void initialize();
 
     return () => {
       cancelled = true;
@@ -199,6 +294,7 @@ export function App() {
       canvas.removeEventListener('pointermove', onPointerMove);
       canvas.removeEventListener('pointerup', onPointerUp);
       canvas.removeEventListener('pointercancel', onPointerCancel);
+      canvas.removeEventListener('pointerleave', onPointerLeave);
       canvas.removeEventListener('wheel', onWheel);
       live.disconnect();
       rendererRef.current = null;
@@ -224,12 +320,86 @@ export function App() {
     try {
       const me = await login(loginName);
       setUsername(me.username);
+      setIsAdmin(me.is_admin);
       setLoginName('');
-      liveRef.current?.connect();
+      liveRef.current?.connect(snapshotSeqRef.current);
     } catch (error) {
       setToast(error instanceof ApiFailure ? error.message : '登录失败');
     } finally {
       setBusy(false);
+    }
+  };
+
+  const openAdminPanel = () => {
+    setAdminWidth(String(dims.width));
+    setAdminHeight(String(dims.height));
+    setAdminPalette([...palette]);
+    setAdminOpen(true);
+  };
+
+  const updateAdminColor = (index: number, value: string) => {
+    setAdminPalette((previous) =>
+      previous.map((hex, i) => (i === index ? value.toUpperCase() : hex)),
+    );
+  };
+
+  const removeAdminColor = (index: number) => {
+    setAdminPalette((previous) =>
+      previous.length <= 1 ? previous : previous.filter((_, i) => i !== index),
+    );
+  };
+
+  const addAdminColor = () => {
+    setAdminPalette((previous) =>
+      previous.length >= 256 ? previous : [...previous, '#FFFFFF'],
+    );
+  };
+
+  const submitAdmin = async (event: FormEvent) => {
+    event.preventDefault();
+    if (adminBusy) return;
+    const width = Number(adminWidth);
+    const height = Number(adminHeight);
+    if (
+      !Number.isInteger(width) || width < 16 || width > 4096 ||
+      !Number.isInteger(height) || height < 16 || height > 4096
+    ) {
+      setToast('宽高必须是 16–4096 的整数');
+      return;
+    }
+    if (
+      adminPalette.length < 1 || adminPalette.length > 256 ||
+      adminPalette.some((hex) => !/^#[0-9A-F]{6}$/.test(hex))
+    ) {
+      setToast('颜色必须是 1–256 个 #RRGGBB');
+      return;
+    }
+    if (
+      (width !== dims.width || height !== dims.height) &&
+      !window.confirm('调整画布尺寸会清空当前画布内容，确认继续？')
+    ) {
+      return;
+    }
+
+    setAdminBusy(true);
+    try {
+      const result = await saveCanvasSettings(width, height, adminPalette);
+      rendererRef.current?.configure(result.width, result.height, result.palette);
+      const snapshot = await fetchSnapshot(true);
+      rendererRef.current?.configure(snapshot.width, snapshot.height, result.palette);
+      rendererRef.current?.load(snapshot.pixels);
+      snapshotSeqRef.current = snapshot.seq;
+      setPalette(result.palette);
+      setDims({ width: result.width, height: result.height });
+      setSelectedColor((previous) =>
+        previous < result.palette.length ? previous : 0,
+      );
+      setAdminOpen(false);
+      setToast('画布设置已更新');
+    } catch (error) {
+      setToast(error instanceof ApiFailure ? error.message : '保存失败');
+    } finally {
+      setAdminBusy(false);
     }
   };
 
@@ -265,13 +435,16 @@ export function App() {
       <main className="stage">
         <div className="canvas-wrap" ref={wrapRef}>
           <canvas className="board" ref={canvasRef} />
+          <div className="cursor-readout" aria-live="off">
+            {hover ? `x ${hover.x} · y ${hover.y}` : 'x — · y —'}
+          </div>
         </div>
         <aside className="sidebar">
           <h2>调色板</h2>
           <div className="palette">
-            {PALETTE.map((hex, index) => (
+            {palette.map((hex, index) => (
               <button
-                key={hex}
+                key={`${index}-${hex}`}
                 type="button"
                 className={`swatch${index === selectedColor ? ' selected' : ''}`}
                 style={{ background: hex }}
@@ -286,8 +459,84 @@ export function App() {
           </div>
           <p className="hint">滚轮缩放 · 拖拽平移 · 单击放置</p>
           <p className="meta">
-            画布 {WIDTH}×{HEIGHT} · 颜色 {selectedColor}
+            画布 {dims.width}×{dims.height} · 颜色 {selectedColor} / {palette.length}
           </p>
+          {isAdmin && (
+            <section className="admin">
+              <h2>管理</h2>
+              {!adminOpen ? (
+                <button type="button" onClick={openAdminPanel}>
+                  调整画布
+                </button>
+              ) : (
+                <form className="admin-form" onSubmit={submitAdmin}>
+                  <div className="admin-size">
+                    <label>
+                      宽
+                      <input
+                        type="number"
+                        min={16}
+                        max={4096}
+                        value={adminWidth}
+                        onChange={(event) => setAdminWidth(event.target.value)}
+                      />
+                    </label>
+                    <label>
+                      高
+                      <input
+                        type="number"
+                        min={16}
+                        max={4096}
+                        value={adminHeight}
+                        onChange={(event) => setAdminHeight(event.target.value)}
+                      />
+                    </label>
+                  </div>
+                  <p className="hint">颜色 {adminPalette.length} 种（1–256）</p>
+                  <div className="admin-colors">
+                    {adminPalette.map((hex, index) => (
+                      <div className="admin-color" key={index}>
+                        <input
+                          type="color"
+                          value={hex.toLowerCase()}
+                          onChange={(event) => updateAdminColor(index, event.target.value)}
+                          aria-label={`颜色 ${index}`}
+                        />
+                        <code>{hex}</code>
+                        <button
+                          type="button"
+                          className="ghost"
+                          disabled={adminPalette.length <= 1}
+                          onClick={() => removeAdminColor(index)}
+                        >
+                          删除
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="admin-actions">
+                    <button
+                      type="button"
+                      onClick={addAdminColor}
+                      disabled={adminPalette.length >= 256}
+                    >
+                      添加颜色
+                    </button>
+                    <button type="submit" disabled={adminBusy}>
+                      {adminBusy ? '保存中…' : '保存'}
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => setAdminOpen(false)}
+                    >
+                      取消
+                    </button>
+                  </div>
+                </form>
+              )}
+            </section>
+          )}
         </aside>
       </main>
 

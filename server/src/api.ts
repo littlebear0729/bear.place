@@ -7,6 +7,11 @@ import { createApp } from './http.js';
 import { attachWebSocket } from './ws.js';
 import { initPublisher } from './events.js';
 import { loadPlaceScript } from './placement.js';
+import {
+  createCanvasState,
+  ensureSchema,
+  loadCanvasConfig,
+} from './canvas-config.js';
 
 const { Pool } = pg;
 
@@ -36,13 +41,15 @@ async function main(): Promise<void> {
   pool.on('error', (error) => console.error('[pg]', error.message));
 
   await waitForRedis(redis);
+  await ensureSchema(pool);
+  const state = createCanvasState(await loadCanvasConfig(redis, pool, config.canvasId));
   await loadPlaceScript(redis);
   // MQ 连接失败不能阻塞 API 启动：放置先降级到 spool，发布器在后台重连。
   void initPublisher(config.amqpUrl, config.queueName, config.spoolDir);
 
-  const app = createApp({ redis, pool });
+  const app = createApp({ redis, pool, state });
   const server = http.createServer(app);
-  const sockets = attachWebSocket(server, { redis, sub });
+  const sockets = attachWebSocket(server, { redis, sub, state });
 
   server.listen(config.port, () => {
     console.log(`[api] listening on :${config.port}`);

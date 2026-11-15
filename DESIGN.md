@@ -152,15 +152,15 @@ r/place 的核心体验是：一个全局共享的像素画布，任何已登录
 
 | 常量 | 值 |
 |---|---|
-| 画布尺寸 | 1000 × 1000（`CANVAS_WIDTH` / `CANVAS_HEIGHT`，服务端与前端各一份常量，快照头部校验） |
-| 颜色索引 | `uint8`，0–15 |
+| 画布尺寸 | 默认 1000 × 1000；管理员可在 16–4096 范围内调整（`canvas_settings`，快照头部携带实际尺寸） |
+| 颜色索引 | `uint8`；调色板默认 16 色，管理员可调整为 1–256 色 |
 | 索引 0 语义 | 背景/空白（`#FFFFFF`）；Redis 零填充后的默认值即为背景 |
 | 冷却窗口 | 300s（`COOLDOWN_SECONDS`） |
 | 增量合并窗口 | 100ms（`BROADCAST_BATCH_MS`） |
 | 幂等 TTL | 10s |
 | 追平流保留 | `MAXLEN ~ 200000`（约 2 分钟写入量） |
 
-调色板（索引 → RGB，固定顺序，前后端与 DB 共用）：
+调色板（索引 → RGB，默认顺序；管理员改色后按新顺序生效，前后端与 DB 共用）：
 
 | # | HEX | # | HEX | # | HEX | # | HEX |
 |---|---|---|---|---|---|---|---|
@@ -246,6 +246,25 @@ GET /api/canvas/deltas?since=918200
 - `since` 已是最新（无新事件）→ `200 {"from": since, "to": since, "d": []}`，客户端可安全重试。
 - 单次最多返回 50,000 条；超过则返回 `410 Gone`（直接全量更便宜）。
 - `d` 按 `s` 升序；客户端应用 `i`（绝对索引）与 `c`，同一 `i` 多次出现时后写入者胜。
+
+#### 4.3.4.1 管理员画布设置
+
+以 `ADMIN_USERNAME`（默认 `admin`）登录的会话可读写运行时画布配置。`GET /api/me` 与 `/api/dev/login` 返回 `is_admin`。
+
+```http
+GET /api/admin/canvas
+200 OK {"width":800,"height":600,"palette":["#FFFFFF",...],"epochSeq":213,"seq":215}
+
+PUT /api/admin/canvas
+Content-Type: application/json
+
+{"width":800,"height":600,"palette":["#FFFFFF","#FF0000"]}
+200 OK {"width":800,"height":600,"palette":[...],"epochSeq":213,"seq":215}
+403 forbidden   非管理员
+400 bad_request 宽高不在 16–4096 或颜色不是 1–256 个 #RRGGBB
+```
+
+尺寸变化会清空画布并递增 `seq`；仅调色板变化保留像素。成功后服务端通过 Redis Pub/Sub `canvas:config` 广播 `{"t":"config","width","height","palette","seq"}`，客户端重拉快照。
 
 #### 4.3.5 WebSocket
 
@@ -578,6 +597,7 @@ POSTGRES_PASSWORD=rplace_dev
 RABBITMQ_USER=rplace
 RABBITMQ_PASSWORD=rplace_dev
 AUTH_SECRET=change-me
+ADMIN_USERNAME=admin
 COOLDOWN_SECONDS=300
 BROADCAST_BATCH_MS=100
 ALLOWED_ORIGINS=http://localhost:8080
@@ -694,12 +714,24 @@ CREATE TABLE canvas_snapshots (
     id          BIGSERIAL PRIMARY KEY,
     canvas_id   TEXT        NOT NULL DEFAULT 'main',
     seq         BIGINT      NOT NULL,
-    canvas_data BYTEA       NOT NULL CHECK (octet_length(canvas_data) = 1000000),
+    canvas_data BYTEA       NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_snapshots_latest ON canvas_snapshots (canvas_id, id DESC);
+
+CREATE TABLE canvas_settings (
+    canvas_id   TEXT PRIMARY KEY,
+    width       INTEGER NOT NULL CHECK (width BETWEEN 16 AND 4096),
+    height      INTEGER NOT NULL CHECK (height BETWEEN 16 AND 4096),
+    palette     JSONB   NOT NULL,
+    epoch_seq   BIGINT  NOT NULL DEFAULT 0,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 ```
+
+- 快照长度随 `canvas_settings` 的尺寸变化，不再固定为 1,000,000 字节。
+- 管理员缩容/扩容会把 `canvas:{canvas}:data` 重置为新尺寸的空画布、递增 `seq`、删除追平 Stream，并把新 `seq` 写入 `epoch_seq`；早于纪元的快照与事件在冷启动时被跳过。
 
 - 体积：1MB × 每分钟 2 次 ≈ 2.9GB/天，必须有保留策略。建议**保留最近 24 小时全部 + 更早的每小时 1 张**，由 Worker 每小时清理一次。
 - **冷启动流程（`init-canvas` 一次性任务）**：

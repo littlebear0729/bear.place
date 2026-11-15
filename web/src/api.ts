@@ -34,7 +34,7 @@ async function failureFrom(res: Response): Promise<ApiFailure> {
 
 export async function login(
   username: string,
-): Promise<{ user_id: number; username: string }> {
+): Promise<{ user_id: number; username: string; is_admin: boolean }> {
   const res = await fetch('/api/dev/login', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -49,10 +49,18 @@ export async function login(
   ) {
     throw new ApiFailure(500, 'bad_response', '登录响应异常');
   }
-  return { user_id: body.user_id, username: body.username };
+  return {
+    user_id: body.user_id,
+    username: body.username,
+    is_admin: body.is_admin === true,
+  };
 }
 
-export async function fetchMe(): Promise<{ user_id: number; username: string | null } | null> {
+export async function fetchMe(): Promise<{
+  user_id: number;
+  username: string | null;
+  is_admin: boolean;
+} | null> {
   const res = await fetch('/api/me');
   if (res.status === 401) return null;
   if (!res.ok) throw new Error(`me HTTP ${res.status}`);
@@ -61,6 +69,37 @@ export async function fetchMe(): Promise<{ user_id: number; username: string | n
   return {
     user_id: body.user_id,
     username: typeof body.username === 'string' ? body.username : null,
+    is_admin: body.is_admin === true,
+  };
+}
+
+export async function saveCanvasSettings(
+  width: number,
+  height: number,
+  palette: string[],
+): Promise<{ width: number; height: number; palette: string[]; seq: number }> {
+  const res = await fetch('/api/admin/canvas', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ width, height, palette }),
+  });
+  if (!res.ok) throw await failureFrom(res);
+  const body: unknown = await res.json();
+  if (
+    !isRecord(body) ||
+    typeof body.width !== 'number' ||
+    typeof body.height !== 'number' ||
+    typeof body.seq !== 'number' ||
+    !Array.isArray(body.palette) ||
+    !body.palette.every((entry) => typeof entry === 'string')
+  ) {
+    throw new ApiFailure(500, 'bad_response', '画布设置响应异常');
+  }
+  return {
+    width: body.width,
+    height: body.height,
+    palette: body.palette as string[],
+    seq: body.seq,
   };
 }
 

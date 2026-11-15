@@ -2,6 +2,7 @@ import { isRecord } from './guards';
 
 export const WIDTH = 1000;
 export const HEIGHT = 1000;
+export const MAX_CANVAS_DIMENSION = 4096;
 
 export const PALETTE = [
   '#FFFFFF',
@@ -22,14 +23,60 @@ export const PALETTE = [
   '#820080',
 ] as const;
 
-export const PALETTE_RGB: ReadonlyArray<readonly [number, number, number]> = PALETTE.map(
-  (hex) => {
-    const value = Number.parseInt(hex.slice(1), 16);
-    return [(value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff] as const;
-  },
-);
-
 export const SNAPSHOT_HEADER_BYTES = 20;
+
+export interface CanvasConfig {
+  width: number;
+  height: number;
+  palette: string[];
+  seq: number;
+}
+
+export interface CanvasMeta {
+  width: number;
+  height: number;
+  seq: number;
+  cooldown_seconds: number;
+  palette: string[];
+  server_time: number;
+}
+
+function parsePalette(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const palette: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string') return null;
+    palette.push(entry);
+  }
+  return palette;
+}
+
+export async function fetchMeta(): Promise<CanvasMeta> {
+  const res = await fetch('/api/canvas/meta', { cache: 'no-store' });
+  if (!res.ok) throw new Error(`meta HTTP ${res.status}`);
+  const body: unknown = await res.json();
+  if (!isRecord(body)) throw new Error('meta malformed');
+  const { width, height, seq, cooldown_seconds, server_time } = body;
+  const palette = parsePalette(body.palette);
+  if (
+    typeof width !== 'number' || !Number.isInteger(width) || width < 1 ||
+    typeof height !== 'number' || !Number.isInteger(height) || height < 1 ||
+    typeof seq !== 'number' || !Number.isFinite(seq) ||
+    typeof cooldown_seconds !== 'number' || !Number.isFinite(cooldown_seconds) ||
+    typeof server_time !== 'number' || !Number.isFinite(server_time) ||
+    !palette
+  ) {
+    throw new Error('meta malformed');
+  }
+  return {
+    width,
+    height,
+    seq,
+    cooldown_seconds,
+    palette,
+    server_time,
+  };
+}
 
 export interface SnapshotData {
   pixels: Uint8Array;
@@ -53,7 +100,10 @@ export async function fetchSnapshot(noStore = false): Promise<SnapshotData> {
 
   if (magic !== 'RPLC') throw new Error('snapshot magic mismatch');
   if (version !== 1) throw new Error(`snapshot version ${version} unsupported`);
-  if (width !== WIDTH || height !== HEIGHT) {
+  if (
+    width < 1 || width > MAX_CANVAS_DIMENSION ||
+    height < 1 || height > MAX_CANVAS_DIMENSION
+  ) {
     throw new Error(`snapshot size ${width}x${height} unsupported`);
   }
   if (raw.length < SNAPSHOT_HEADER_BYTES + width * height) {
@@ -103,6 +153,14 @@ export type ServerFrame =
       cooldown_ms: number;
       width: number;
       height: number;
+      palette: string[];
+    }
+  | {
+      t: 'config';
+      width: number;
+      height: number;
+      palette: string[];
+      seq: number;
     }
   | { t: 'px'; s: number; d: [number, number][] }
   | { t: 'ping'; ts: number }
@@ -120,16 +178,32 @@ export function parseFrame(raw: string): ServerFrame | null {
 
   if (value.t === 'hello') {
     const { seq, server_time, cooldown_ms, width, height } = value;
+    const palette = parsePalette(value.palette);
     if (
       typeof seq !== 'number' ||
       typeof server_time !== 'number' ||
       typeof cooldown_ms !== 'number' ||
       typeof width !== 'number' ||
-      typeof height !== 'number'
+      typeof height !== 'number' ||
+      !palette
     ) {
       return null;
     }
-    return { t: 'hello', seq, server_time, cooldown_ms, width, height };
+    return { t: 'hello', seq, server_time, cooldown_ms, width, height, palette };
+  }
+
+  if (value.t === 'config') {
+    const { width, height, seq } = value;
+    const palette = parsePalette(value.palette);
+    if (
+      typeof width !== 'number' ||
+      typeof height !== 'number' ||
+      typeof seq !== 'number' ||
+      !palette
+    ) {
+      return null;
+    }
+    return { t: 'config', width, height, palette, seq };
   }
 
   if (value.t === 'px') {

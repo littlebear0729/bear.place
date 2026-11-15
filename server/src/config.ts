@@ -8,6 +8,7 @@ export const config = {
   cooldownSeconds: Number(process.env.COOLDOWN_SECONDS ?? 300),
   broadcastBatchMs: Number(process.env.BROADCAST_BATCH_MS ?? 100),
   authSecret: process.env.AUTH_SECRET ?? 'dev-only-secret',
+  adminUsername: process.env.ADMIN_USERNAME ?? 'admin',
   allowedOrigins: (process.env.ALLOWED_ORIGINS ?? 'http://localhost:8080,http://localhost:5173')
     .split(',')
     .map((s) => s.trim())

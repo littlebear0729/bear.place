@@ -2,7 +2,8 @@ import amqp from 'amqplib';
 import { Redis } from 'ioredis';
 import pg from 'pg';
 import { config } from './config.js';
-import { keys, PIXEL_COUNT } from './constants.js';
+import { keys } from './constants.js';
+import { ensureSchema, loadCanvasConfig } from './canvas-config.js';
 import { canvasSeq, persistenceQueueDepth } from './metrics.js';
 import { drainSpool, type PixelEvent } from './spool.js';
 import { isRecord } from './guards.js';
@@ -45,6 +46,7 @@ async function main(): Promise<void> {
   });
   pool.on('error', (error) => console.error('[pg]', error.message));
   redis.on('error', (error) => console.error('[redis]', error.message));
+  await ensureSchema(pool);
   let stopping = false;
 
   const insertEvents = async (events: PixelEvent[]): Promise<void> => {
@@ -85,8 +87,10 @@ async function main(): Promise<void> {
     if (!Buffer.isBuffer(data)) return;
     const seqRaw: unknown = reply[1]?.[1];
     const seq = typeof seqRaw === 'string' ? Number(seqRaw) : 0;
-    const padded = Buffer.alloc(PIXEL_COUNT);
-    data.copy(padded, 0, 0, Math.min(data.length, PIXEL_COUNT));
+    const canvas = await loadCanvasConfig(redis, pool, config.canvasId);
+    const pixelCount = canvas.width * canvas.height;
+    const padded = Buffer.alloc(pixelCount);
+    data.copy(padded, 0, 0, Math.min(data.length, pixelCount));
     canvasSeq.set(seq);
     await pool.query(
       `INSERT INTO canvas_snapshots (canvas_id, seq, canvas_data) VALUES ($1, $2, $3)`,

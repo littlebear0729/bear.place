@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import type { Redis } from 'ioredis';
-import { keys, PIXEL_COUNT } from './constants.js';
+import { keys } from './constants.js';
 
 const luaSource = readFileSync(new URL('./place.lua', import.meta.url), 'utf8');
 let sha: string | null = null;
@@ -9,7 +9,8 @@ export type PlaceResult =
   | { kind: 'ok'; seq: number; ttl: number }
   | { kind: 'replay'; body: string }
   | { kind: 'cooldown'; ttl: number }
-  | { kind: 'invalid' };
+  | { kind: 'invalid' }
+  | { kind: 'invalid_color' };
 
 export async function loadPlaceScript(redis: Redis): Promise<string> {
   sha = (await redis.script('LOAD', luaSource)) as string;
@@ -42,6 +43,8 @@ export async function placePixel(
     color: number;
     requestId: string;
     cooldownSeconds: number;
+    maxOffset: number;
+    maxColor: number;
     nowMs: number;
   },
 ): Promise<PlaceResult> {
@@ -56,8 +59,9 @@ export async function placePixel(
     String(params.offset),
     Buffer.from([params.color]),
     String(params.cooldownSeconds),
-    String(PIXEL_COUNT),
+    String(params.maxOffset),
     String(params.nowMs),
+    String(params.maxColor),
   ];
 
   const raw = await evalPlace(redis, keyList, args);
@@ -74,6 +78,9 @@ export async function placePixel(
   }
   if (kind === -1) {
     return { kind: 'cooldown', ttl: Number(raw[1]) };
+  }
+  if (kind === -3) {
+    return { kind: 'invalid_color' };
   }
   return { kind: 'invalid' };
 }

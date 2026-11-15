@@ -20,8 +20,11 @@ export const unauthenticated = () =>
 export const outOfBounds = () =>
   new ApiError(422, 'out_of_bounds', '坐标超出画布范围');
 
-export const badColor = () =>
-  new ApiError(422, 'bad_color', '颜色索引必须在 0–15');
+export const badColor = (paletteSize = 16) =>
+  new ApiError(422, 'bad_color', `颜色索引必须在 0–${Math.max(0, paletteSize - 1)}`);
+
+export const forbidden = () =>
+  new ApiError(403, 'forbidden', '需要管理员权限');
 
 export const cooldown = (ttlSeconds: number) =>
   new ApiError(429, 'cooldown', '仍在冷却中', Math.max(0, ttlSeconds) * 1000);
