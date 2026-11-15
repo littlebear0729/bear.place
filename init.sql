@@ -1,4 +1,4 @@
--- r/place 初始化 schema（与 DESIGN.md §8 一致）
+-- bear.place 初始化 schema（与 DESIGN.md §8 一致）
 -- 由 docker-entrypoint-initdb.d 在数据库首次创建时执行。
 
 CREATE TABLE users (

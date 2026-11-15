@@ -1,4 +1,4 @@
-# r/place
+# bear.place
 
 高并发实时协作画布。设计文档见 [DESIGN.md](DESIGN.md)。
 

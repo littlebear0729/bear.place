@@ -409,7 +409,7 @@ export function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <div className="brand">r/place</div>
+        <div className="brand">bear.place</div>
         <div className={`conn conn-${connection}`}>
           {connection === 'live' ? '实时' : connection === 'connecting' ? '同步中' : '离线'}
         </div>
